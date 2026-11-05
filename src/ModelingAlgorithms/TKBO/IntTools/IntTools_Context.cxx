@@ -340,6 +340,20 @@ BRepAdaptor_Surface& IntTools_Context::SurfaceAdaptor(const TopoDS_Face& theFace
 
 //=================================================================================================
 
+const occ::handle<IntCurveSurface_PolyhedronCache>& IntTools_Context::PolyhedronCache(
+  const TopoDS_Face& theFace)
+{
+  if (const occ::handle<IntCurveSurface_PolyhedronCache>* aCache =
+        myPolyhedronCacheMap.Seek(theFace))
+  {
+    return *aCache;
+  }
+  const occ::handle<IntCurveSurface_PolyhedronCache> aNew = new IntCurveSurface_PolyhedronCache();
+  return *myPolyhedronCacheMap.Bound(theFace, aNew);
+}
+
+//=================================================================================================
+
 Geom2dHatch_Hatcher& IntTools_Context::Hatcher(const TopoDS_Face& aF)
 {
   Geom2dHatch_Hatcher* pHatcher = nullptr;

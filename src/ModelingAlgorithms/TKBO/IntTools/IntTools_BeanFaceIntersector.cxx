@@ -561,12 +561,38 @@ double IntTools_BeanFaceIntersector::Distance(const double theArg,
 
 //=================================================================================================
 
+namespace
+{
+//! Tells if the adaptor shows its face as the context's own adaptor does: a caller may hand any
+//! adaptor, and only one on the face's surface and bounds may reuse the polyhedra kept for the face
+bool isAdaptorOfItsFace(const BRepAdaptor_Surface& theSurface, IntTools_Context& theContext)
+{
+  if (theSurface.Face().IsNull())
+  {
+    return false;
+  }
+  const BRepAdaptor_Surface& aFaceSurface = theContext.SurfaceAdaptor(theSurface.Face());
+  return aFaceSurface.GeomSurfaceOriginal() == theSurface.GeomSurfaceOriginal()
+         && aFaceSurface.FirstUParameter() == theSurface.FirstUParameter()
+         && aFaceSurface.LastUParameter() == theSurface.LastUParameter()
+         && aFaceSurface.FirstVParameter() == theSurface.FirstVParameter()
+         && aFaceSurface.LastVParameter() == theSurface.LastVParameter();
+}
+} // namespace
+
+//=================================================================================================
+
 void IntTools_BeanFaceIntersector::ComputeAroundExactIntersection()
 {
   IntCurveSurface_HInter anExactIntersector;
 
   occ::handle<BRepAdaptor_Curve>   aCurve   = new BRepAdaptor_Curve(myCurve);
   occ::handle<BRepAdaptor_Surface> aSurface = new BRepAdaptor_Surface(mySurface);
+
+  if (isAdaptorOfItsFace(mySurface, *myContext))
+  {
+    anExactIntersector.SetPolyhedronCache(myContext->PolyhedronCache(mySurface.Face()));
+  }
 
   anExactIntersector.Perform(aCurve, aSurface);
 

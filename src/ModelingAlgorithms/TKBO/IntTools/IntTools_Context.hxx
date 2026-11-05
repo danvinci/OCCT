@@ -26,6 +26,7 @@
 #include <Standard_Transient.hxx>
 #include <TopAbs_State.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <IntCurveSurface_PolyhedronCache.hxx>
 class IntTools_FClass2d;
 class TopoDS_Face;
 class GeomAPI_ProjectPointOnSurf;
@@ -85,6 +86,10 @@ public:
 
   //! Returns a reference to surface adaptor for given face
   Standard_EXPORT BRepAdaptor_Surface& SurfaceAdaptor(const TopoDS_Face& theFace);
+
+  //! Returns the polyhedra kept for intersecting curves with given face
+  Standard_EXPORT const occ::handle<IntCurveSurface_PolyhedronCache>& PolyhedronCache(
+    const TopoDS_Face& theFace);
 
   //! Builds and stores an Oriented Bounding Box for the shape.
   //! Returns a reference to OBB.
@@ -256,6 +261,10 @@ protected:
   // clang-format off
   NCollection_DataMap<TopoDS_Shape, Bnd_OBB*, TopTools_ShapeMapHasher> myOBBMap; // Map of oriented bounding boxes
   // clang-format on
+  NCollection_DataMap<TopoDS_Shape,
+                      occ::handle<IntCurveSurface_PolyhedronCache>,
+                      TopTools_ShapeMapHasher>
+         myPolyhedronCacheMap;
   int    myCreateFlag;
   double myPOnSTolerance;
 

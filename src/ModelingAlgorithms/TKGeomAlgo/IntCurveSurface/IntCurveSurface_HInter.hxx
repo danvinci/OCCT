@@ -20,6 +20,7 @@
 #include <Adaptor3d_Curve.hxx>
 #include <Adaptor3d_Surface.hxx>
 #include <IntCurveSurface_Intersection.hxx>
+#include <IntCurveSurface_PolyhedronCache.hxx>
 #include <gp_Pnt.hxx>
 #include <NCollection_Array2.hxx>
 #include <NCollection_Array1.hxx>
@@ -51,6 +52,13 @@ public:
 
   //! Empty Constructor
   Standard_EXPORT IntCurveSurface_HInter();
+
+  //! Sets the polyhedra to reuse for the surface of the next intersections, and to keep the new
+  //! ones in. The cache belongs to one surface: every later Perform must be given that surface.
+  void SetPolyhedronCache(const occ::handle<IntCurveSurface_PolyhedronCache>& theCache)
+  {
+    myPolyhedronCache = theCache;
+  }
 
   //! Compute the Intersection between the curve and the
   //! surface
@@ -205,6 +213,8 @@ private:
                                    const NCollection_Array1<double>&     Y,
                                    const NCollection_Array1<double>&     Z,
                                    NCollection_Array1<double>&           Bounds);
+
+  occ::handle<IntCurveSurface_PolyhedronCache> myPolyhedronCache;
 };
 
 #endif // _IntCurveSurface_HInter_HeaderFile

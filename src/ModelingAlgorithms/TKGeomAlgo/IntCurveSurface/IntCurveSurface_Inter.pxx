@@ -41,6 +41,9 @@
 #include <NCollection_Array1.hxx>
 #include <NCollection_HArray1.hxx>
 
+#include <memory>
+#include <utility>
+
 #include "IntCurveSurface_InterUtils.pxx"
 
 namespace IntCurveSurface_InterImpl
@@ -438,7 +441,46 @@ void InternalPerformCurveQuadric(const CurveType&   theCurve,
   }
 }
 
-//! Internal perform with polygon and UV bounds, creating polyhedron as needed.
+//! Polyhedron sampling a patch of a surface that is no quadric.
+template <typename SurfaceType, typename SurfaceTool, typename PolyhedronType>
+std::unique_ptr<PolyhedronType> MakePolyhedron(const SurfaceType& theSurface,
+                                               const double       theU1,
+                                               const double       theV1,
+                                               const double       theU2,
+                                               const double       theV2)
+{
+  if (SurfaceTool::GetType(theSurface) != GeomAbs_BSplineSurface)
+  {
+    int nbsu = SurfaceTool::NbSamplesU(theSurface, theU1, theU2);
+    int nbsv = SurfaceTool::NbSamplesV(theSurface, theV1, theV2);
+    if (nbsu > 40)
+    {
+      nbsu = 40;
+    }
+    if (nbsv > 40)
+    {
+      nbsv = 40;
+    }
+    return std::make_unique<PolyhedronType>(theSurface, nbsu, nbsv, theU1, theV1, theU2, theV2);
+  }
+
+  occ::handle<Adaptor3d_Surface> aS         = SurfaceTool::UTrim(theSurface, theU1, theU2, 1.e-9);
+  aS                                        = aS->VTrim(theV1, theV2, 1.e-9);
+  occ::handle<Adaptor3d_TopolTool> aTopTool = new Adaptor3d_TopolTool(aS);
+  double                           defl     = 0.1;
+  aTopTool->SamplePnts(defl, 10, 10);
+
+  int                        nbpu = aTopTool->NbSamplesU();
+  int                        nbpv = aTopTool->NbSamplesV();
+  NCollection_Array1<double> Upars(1, nbpu), Vpars(1, nbpv);
+  aTopTool->UParameters(Upars);
+  aTopTool->VParameters(Vpars);
+
+  return std::make_unique<PolyhedronType>(theSurface, Upars, Vpars);
+}
+
+//! Internal perform with polygon and UV bounds, reusing the cache's polyhedron if a cache is given
+//! and it holds one, else creating it, and keeping it in the cache if a cache is given.
 template <typename CurveType,
           typename CurveTool,
           typename SurfaceType,
@@ -446,6 +488,7 @@ template <typename CurveType,
           typename PolygonType,
           typename PolyhedronType,
           typename QuadCurvExactInterType,
+          typename PolyhedronCacheType,
           typename InternalPerformPolyFunc,
           typename AppendFunc>
 void InternalPerformPolygonBounds(const CurveType&        theCurve,
@@ -455,6 +498,7 @@ void InternalPerformPolygonBounds(const CurveType&        theCurve,
                                   const double            theV1,
                                   const double            theU2,
                                   const double            theV2,
+                                  PolyhedronCacheType*    theCache,
                                   InternalPerformPolyFunc theInternalPerformPoly,
                                   AppendFunc              theAppend)
 {
@@ -462,52 +506,28 @@ void InternalPerformPolygonBounds(const CurveType&        theCurve,
   if ((aSurfaceType != GeomAbs_Plane) && (aSurfaceType != GeomAbs_Cylinder)
       && (aSurfaceType != GeomAbs_Cone) && (aSurfaceType != GeomAbs_Sphere))
   {
-    if (aSurfaceType != GeomAbs_BSplineSurface)
+    std::unique_ptr<PolyhedronType> aNew;
+    const PolyhedronType*           aPolyhedron =
+      theCache != nullptr ? theCache->Find(theU1, theV1, theU2, theV2) : nullptr;
+    if (aPolyhedron == nullptr)
     {
-      int nbsu = SurfaceTool::NbSamplesU(theSurface, theU1, theU2);
-      int nbsv = SurfaceTool::NbSamplesV(theSurface, theV1, theV2);
-      if (nbsu > 40)
-      {
-        nbsu = 40;
-      }
-      if (nbsv > 40)
-      {
-        nbsv = 40;
-      }
-      PolyhedronType polyhedron(theSurface, nbsu, nbsv, theU1, theV1, theU2, theV2);
-      theInternalPerformPoly(theCurve,
-                             thePolygon,
-                             theSurface,
-                             polyhedron,
-                             theU1,
-                             theV1,
-                             theU2,
-                             theV2);
+      aNew        = MakePolyhedron<SurfaceType, SurfaceTool, PolyhedronType>(theSurface,
+                                                                      theU1,
+                                                                      theV1,
+                                                                      theU2,
+                                                                      theV2);
+      aPolyhedron = theCache != nullptr
+                      ? &theCache->Add(theU1, theV1, theU2, theV2, std::move(aNew))
+                      : aNew.get();
     }
-    else
-    {
-      occ::handle<Adaptor3d_Surface> aS = SurfaceTool::UTrim(theSurface, theU1, theU2, 1.e-9);
-      aS                                = aS->VTrim(theV1, theV2, 1.e-9);
-      occ::handle<Adaptor3d_TopolTool> aTopTool = new Adaptor3d_TopolTool(aS);
-      double                           defl     = 0.1;
-      aTopTool->SamplePnts(defl, 10, 10);
-
-      int                        nbpu = aTopTool->NbSamplesU();
-      int                        nbpv = aTopTool->NbSamplesV();
-      NCollection_Array1<double> Upars(1, nbpu), Vpars(1, nbpv);
-      aTopTool->UParameters(Upars);
-      aTopTool->VParameters(Vpars);
-
-      PolyhedronType polyhedron(theSurface, Upars, Vpars);
-      theInternalPerformPoly(theCurve,
-                             thePolygon,
-                             theSurface,
-                             polyhedron,
-                             theU1,
-                             theV1,
-                             theU2,
-                             theV2);
-    }
+    theInternalPerformPoly(theCurve,
+                           thePolygon,
+                           theSurface,
+                           *aPolyhedron,
+                           theU1,
+                           theV1,
+                           theU2,
+                           theV2);
   }
   else
   {
