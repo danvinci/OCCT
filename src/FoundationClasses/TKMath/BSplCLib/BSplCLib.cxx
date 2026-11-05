@@ -1278,12 +1278,17 @@ void BSplCLib::Bohm(const double U,
     {
       const size_t aNbPoles = static_cast<size_t>(aDegree) + 1;
       // Reserve room for every weighted pole and the restored origin.
-      const double aLimit = RealLast() / static_cast<double>(aNbPoles + 1);
-      hasValue            = true;
-      for (size_t anIndex = 0; anIndex < aNbPoles * aDimension; ++anIndex)
+      const double                     aLimit = RealLast() / static_cast<double>(aNbPoles + 1);
+      const NCollection_Array1<double> aCoordinates(Poles,
+                                                    1,
+                                                    static_cast<int>(aNbPoles * aDimension));
+      // Coordinates out of range, a NaN included, counted without a branch per coordinate
+      size_t aNbOutside = 0;
+      for (const double aCoordinate : aCoordinates)
       {
-        hasValue &= std::abs((&Poles)[anIndex]) <= aLimit;
+        aNbOutside += static_cast<size_t>(!(std::abs(aCoordinate) <= aLimit));
       }
+      hasValue = aNbOutside == 0;
       controlPolygonOrigin(
         aNbPoles,
         aDimension,
