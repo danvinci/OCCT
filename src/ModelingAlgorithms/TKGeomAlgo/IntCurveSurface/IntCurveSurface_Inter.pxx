@@ -479,8 +479,16 @@ std::unique_ptr<PolyhedronType> MakePolyhedron(const SurfaceType& theSurface,
   return std::make_unique<PolyhedronType>(theSurface, Upars, Vpars);
 }
 
-//! Internal perform with polygon and UV bounds, reusing the cache's polyhedron if a cache is given
-//! and it holds one, else creating it, and keeping it in the cache if a cache is given.
+//! Tells if the intersections with the surface are computed without a polyhedron.
+template <typename SurfaceType, typename SurfaceTool>
+bool IsQuadric(const SurfaceType& theSurface)
+{
+  const GeomAbs_SurfaceType aSurfaceType = SurfaceTool::GetType(theSurface);
+  return aSurfaceType == GeomAbs_Plane || aSurfaceType == GeomAbs_Cylinder
+         || aSurfaceType == GeomAbs_Cone || aSurfaceType == GeomAbs_Sphere;
+}
+
+//! Internal perform with polygon and UV bounds, creating polyhedron as needed.
 template <typename CurveType,
           typename CurveTool,
           typename SurfaceType,
@@ -488,7 +496,6 @@ template <typename CurveType,
           typename PolygonType,
           typename PolyhedronType,
           typename QuadCurvExactInterType,
-          typename PolyhedronCacheType,
           typename InternalPerformPolyFunc,
           typename AppendFunc>
 void InternalPerformPolygonBounds(const CurveType&        theCurve,
@@ -498,28 +505,17 @@ void InternalPerformPolygonBounds(const CurveType&        theCurve,
                                   const double            theV1,
                                   const double            theU2,
                                   const double            theV2,
-                                  PolyhedronCacheType*    theCache,
                                   InternalPerformPolyFunc theInternalPerformPoly,
                                   AppendFunc              theAppend)
 {
-  GeomAbs_SurfaceType aSurfaceType = SurfaceTool::GetType(theSurface);
-  if ((aSurfaceType != GeomAbs_Plane) && (aSurfaceType != GeomAbs_Cylinder)
-      && (aSurfaceType != GeomAbs_Cone) && (aSurfaceType != GeomAbs_Sphere))
+  if (!IsQuadric<SurfaceType, SurfaceTool>(theSurface))
   {
-    std::unique_ptr<PolyhedronType> aNew;
-    const PolyhedronType*           aPolyhedron =
-      theCache != nullptr ? theCache->Find(theU1, theV1, theU2, theV2) : nullptr;
-    if (aPolyhedron == nullptr)
-    {
-      aNew        = MakePolyhedron<SurfaceType, SurfaceTool, PolyhedronType>(theSurface,
-                                                                      theU1,
-                                                                      theV1,
-                                                                      theU2,
-                                                                      theV2);
-      aPolyhedron = theCache != nullptr
-                      ? &theCache->Add(theU1, theV1, theU2, theV2, std::move(aNew))
-                      : aNew.get();
-    }
+    const std::unique_ptr<PolyhedronType> aPolyhedron =
+      MakePolyhedron<SurfaceType, SurfaceTool, PolyhedronType>(theSurface,
+                                                               theU1,
+                                                               theV1,
+                                                               theU2,
+                                                               theV2);
     theInternalPerformPoly(theCurve,
                            thePolygon,
                            theSurface,

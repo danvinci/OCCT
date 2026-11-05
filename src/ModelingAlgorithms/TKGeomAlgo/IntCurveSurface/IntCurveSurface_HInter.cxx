@@ -339,6 +339,24 @@ void IntCurveSurface_HInter::InternalPerform(const TheCurve&   curve,
                                              const double      U2,
                                              const double      V2)
 {
+  if (!myPolyhedronCache.IsNull()
+      && !IntCurveSurface_InterImpl::IsQuadric<TheSurface, TheSurfaceTool>(surface))
+  {
+    const ThePolyhedron* aKept = myPolyhedronCache->Find(U1, V1, U2, V2);
+    if (aKept == nullptr)
+    {
+      std::unique_ptr<ThePolyhedron> aNew =
+        IntCurveSurface_InterImpl::MakePolyhedron<TheSurface, TheSurfaceTool, ThePolyhedron>(
+          surface,
+          U1,
+          V1,
+          U2,
+          V2);
+      aKept = &myPolyhedronCache->Add(U1, V1, U2, V2, std::move(aNew));
+    }
+    InternalPerform(curve, polygon, surface, *aKept, U1, V1, U2, V2);
+    return;
+  }
   IntCurveSurface_InterImpl::InternalPerformPolygonBounds<TheCurve,
                                                           TheCurveTool,
                                                           TheSurface,
@@ -353,7 +371,6 @@ void IntCurveSurface_HInter::InternalPerform(const TheCurve&   curve,
     V1,
     U2,
     V2,
-    myPolyhedronCache.get(),
     [this](const TheCurve&      c,
            const ThePolygon&    p,
            const TheSurface&    s,
