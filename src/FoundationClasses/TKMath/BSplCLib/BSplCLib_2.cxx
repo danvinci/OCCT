@@ -298,13 +298,13 @@ int BSplCLib::EvalBsplineBasis(const int                         theDerivativeRe
                                math_Matrix&                      theBasis,
                                bool                              thePeriodic)
 {
-  return evalBsplineBasis<false>(theDerivativeRequest,
-                                 theOrder,
-                                 theFlatKnots,
-                                 theParameter,
-                                 theFirstIndex,
-                                 theBasis,
-                                 thePeriodic);
+  return evalBsplineBasis(theDerivativeRequest,
+                          theOrder,
+                          theFlatKnots,
+                          theParameter,
+                          theFirstIndex,
+                          theBasis,
+                          thePeriodic);
 }
 
 //=================================================================================================
