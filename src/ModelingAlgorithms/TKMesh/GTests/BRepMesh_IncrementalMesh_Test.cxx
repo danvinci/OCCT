@@ -33,6 +33,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_CylindricalSurface.hxx>
+#include <Geom_OffsetSurface.hxx>
 #include <IMeshData_Status.hxx>
 #include <IMeshTools_Parameters.hxx>
 #include <NCollection_Array1.hxx>
@@ -583,5 +584,47 @@ TEST(BRepMesh_IncrementalMeshTest, LocalizedSplinePeaksRespectDeflection)
       }
     }
     EXPECT_LE(aMaxDistance, aParameters.Deflection);
+  }
+}
+
+// The mesher's filter evaluates an offset surface directly along its grid lines, a pole among them
+TEST(BRepMesh_IncrementalMeshTest, OffsetSplineWithPoleMeshesOnItsSurface)
+{
+  NCollection_Array2<gp_Pnt> aPoles(1, 6, 1, 6);
+  for (int aU = 1; aU <= 6; ++aU)
+  {
+    for (int aV = 1; aV <= 6; ++aV)
+    {
+      const double aY = aU == 1 ? 25.0 : 10.0 * (aV - 1);
+      aPoles(aU, aV)  = gp_Pnt(10.0 * (aU - 1), aY, 5.0 * std::sin(0.7 * aU) * std::cos(0.5 * aV));
+    }
+  }
+  NCollection_Array1<double> aKnots(1, 4);
+  NCollection_Array1<int>    aMults(1, 4);
+  for (int anIndex = 1; anIndex <= 4; ++anIndex)
+  {
+    aKnots(anIndex) = anIndex - 1.0;
+    aMults(anIndex) = anIndex == 1 || anIndex == 4 ? 4 : 1;
+  }
+  const occ::handle<Geom_OffsetSurface> aSurface =
+    new Geom_OffsetSurface(new Geom_BSplineSurface(aPoles, aKnots, aKnots, aMults, aMults, 3, 3),
+                           0.5);
+  const TopoDS_Face     aFace = BRepBuilderAPI_MakeFace(aSurface, Precision::Confusion());
+  IMeshTools_Parameters aParameters;
+  aParameters.Deflection = 0.05;
+  aParameters.Angle      = 0.3;
+  BRepMesh_IncrementalMesh aMesher(aFace, aParameters);
+  ASSERT_TRUE(aMesher.IsDone());
+  EXPECT_EQ(aMesher.GetStatusFlags(), 0);
+  TopLoc_Location                       aLocation;
+  const occ::handle<Poly_Triangulation> aTriangulation = BRep_Tool::Triangulation(aFace, aLocation);
+  ASSERT_FALSE(aTriangulation.IsNull());
+  ASSERT_TRUE(aTriangulation->HasUVNodes());
+  EXPECT_GT(aTriangulation->NbTriangles(), 100);
+  for (int aNode = 1; aNode <= aTriangulation->NbNodes(); ++aNode)
+  {
+    const gp_Pnt2d aUV = aTriangulation->UVNode(aNode);
+    EXPECT_LE(aTriangulation->Node(aNode).Distance(aSurface->Value(aUV.X(), aUV.Y())),
+              aParameters.Deflection);
   }
 }

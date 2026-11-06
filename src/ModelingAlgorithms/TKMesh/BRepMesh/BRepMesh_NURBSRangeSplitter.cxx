@@ -18,10 +18,12 @@
 #include <algorithm>
 #include <BRepMesh_GeomTool.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <GeomAdaptor_Surface.hxx>
 #include <GeomLib.hxx>
 #include <IMeshData_Edge.hxx>
 #include <IMeshData_Wire.hxx>
 #include <NCollection_Handle.hxx>
+#include <Standard_Failure.hxx>
 
 namespace
 {
@@ -37,6 +39,7 @@ public:
                    const Handle(IMeshData::MapOfReal)&      theControlParamsForbiddenToRemove)
       : myDFace(theDFace),
         mySurface(myDFace->GetSurface()->GeomSurfaceOriginal()),
+        myAdaptor(mySurface),
         myIsoU(theIsoType == GeomAbs_IsoU),
         myParams(theParams),
         myControlParams(theControlParams),
@@ -71,11 +74,10 @@ public:
     for (int i = aStartIndex; i <= aEndIndex; ++i)
     {
       myCurrParam = myParams->Value(i);
-      myIso =
-        new GeomAdaptor_Curve(myIsoU ? mySurface->UIso(myCurrParam) : mySurface->VIso(myCurrParam));
+      myIso.Nullify();
 
       myPrevControlParam = myControlParams->Value(1);
-      myIso->D1(myPrevControlParam, myPrevControlPnt, myPrevControlVec);
+      lineD1(myPrevControlParam, myPrevControlPnt, myPrevControlVec);
       for (int j = 2; j <= myControlParams->Length();)
       {
         j += checkControlPointAndMoveOn(j);
@@ -86,16 +88,68 @@ public:
   }
 
 private:
+  //! Builds the current line's iso curve, for a surface undefined somewhere along it
+  void useIsoCurve()
+  {
+    myIso =
+      new GeomAdaptor_Curve(myIsoU ? mySurface->UIso(myCurrParam) : mySurface->VIso(myCurrParam));
+  }
+
+  //! Point and derivative along the current line: on the surface itself, since an iso curve of an
+  //! offset surface is a whole B-spline approximation
+  void lineD1(const double theParam, gp_Pnt& thePnt, gp_Vec& theVec)
+  {
+    if (myIso.IsNull())
+    {
+      try
+      {
+        gp_Vec anAcross;
+        if (myIsoU)
+        {
+          myAdaptor.D1(myCurrParam, theParam, thePnt, anAcross, theVec);
+        }
+        else
+        {
+          myAdaptor.D1(theParam, myCurrParam, thePnt, theVec, anAcross);
+        }
+        return;
+      }
+      catch (const Standard_Failure&)
+      {
+        useIsoCurve();
+      }
+    }
+    myIso->D1(theParam, thePnt, theVec);
+  }
+
+  //! Point along the current line, as lineD1 evaluates it
+  gp_Pnt lineValue(const double theParam)
+  {
+    if (myIso.IsNull())
+    {
+      try
+      {
+        return myIsoU ? myAdaptor.Value(myCurrParam, theParam)
+                      : myAdaptor.Value(theParam, myCurrParam);
+      }
+      catch (const Standard_Failure&)
+      {
+        useIsoCurve();
+      }
+    }
+    return myIso->Value(theParam);
+  }
+
   //! Checks the given control point for deviation.
   //! Returns number of steps to be used to move point iterator.
   int checkControlPointAndMoveOn(const int theIndex)
   {
     int aMoveSteps     = 0;
     myCurrControlParam = myControlParams->Value(theIndex);
-    myIso->D1(myCurrControlParam, myCurrControlPnt, myCurrControlVec);
+    lineD1(myCurrControlParam, myCurrControlPnt, myCurrControlVec);
 
     const double aMidParam = 0.5 * (myPrevControlParam + myCurrControlParam);
-    const gp_Pnt aMidPnt   = myIso->Value(aMidParam);
+    const gp_Pnt aMidPnt   = lineValue(aMidParam);
 
     const double aSqDist =
       BRepMesh_GeomTool::SquareDeflectionOfSegment(myPrevControlPnt, myCurrControlPnt, aMidPnt);
@@ -149,10 +203,10 @@ private:
   {
     gp_Pnt aTmpPnt;
     gp_Vec aTmpVec;
-    myIso->D1(theParam, aTmpPnt, aTmpVec);
+    lineD1(theParam, aTmpPnt, aTmpVec);
 
     const double aTmpMidParam = 0.5 * (myPrevControlParam + theParam);
-    const gp_Pnt aTmpMidPnt   = myIso->Value(aTmpMidParam);
+    const gp_Pnt aTmpMidPnt   = lineValue(aTmpMidParam);
 
     // Lets check next parameter.
     // If it also fits deflection, we can remove previous parameter.
@@ -188,6 +242,7 @@ private:
 private:
   IMeshData::IFaceHandle            myDFace;
   occ::handle<Geom_Surface>         mySurface;
+  GeomAdaptor_Surface               myAdaptor;
   bool                              myIsoU;
   Handle(IMeshData::SequenceOfReal) myParams;
   Handle(IMeshData::SequenceOfReal) myControlParams;
