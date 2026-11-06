@@ -42,7 +42,9 @@
 #include <math_Vector.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 
 typedef gp_Pnt                     Pnt;
 typedef gp_Vec                     Vec;
@@ -1227,11 +1229,15 @@ bool evalLocalBasis(const int     theDegree,
       const double aSaved      = aFactor * aValue;
       const double aLeft       = aLeftFactor * aValue;
       // A small basis product can still give a finite coordinate after pole scaling
-      const bool isSavedLost = (aFactor != 0.0) & (aSaved < RealSmall());
-      const bool isLeftLost  = (aLeftFactor != 0.0) & (aLeft < RealSmall());
-      isLost                 = isLost | ((aValue != 0.0) & (isSavedLost | isLeftLost));
-      aRow[aBasis]           = aLeft + aCarry;
-      aCarry                 = aSaved;
+      if (aSaved < RealSmall() || aLeft < RealSmall())
+      {
+        isLost = isLost
+                 || (aValue != 0.0
+                     && ((aFactor != 0.0 && aSaved < RealSmall())
+                         || (aLeftFactor != 0.0 && aLeft < RealSmall())));
+      }
+      aRow[aBasis] = aLeft + aCarry;
+      aCarry       = aSaved;
     }
     aRow[aRowDegree] = aCarry;
   }
@@ -1240,42 +1246,37 @@ bool evalLocalBasis(const int     theDegree,
 
 //==================================================================================================
 
-// A common origin for one control polygon of in-range coordinates, whose subtraction preserves
-// every pole: like-signed coordinates within a factor of two subtract exactly, and any other
-// coordinate keeps an origin of zero. Reading each coordinate's extremes takes no branch per pole
+// A common origin for one control polygon of in-range coordinates: its first pole, for a coordinate
+// where every pole lies within half of it, so subtracting it is exact (Sterbenz); otherwise zero
 template <size_t TheFixedDimension>
 void boundedPolygonOrigin(const size_t  theNbPoles,
                           const size_t  theDimension,
                           const double* thePoles,
-                          double*       theHighest,
                           double*       theOrigin)
 {
   const size_t aDimension = TheFixedDimension != 0 ? TheFixedDimension : theDimension;
-  // The origin holds each coordinate's lowest until the last loop
+  std::array<std::int64_t, TheFixedDimension != 0 ? TheFixedDimension : 1> aFixedFar{};
+  NCollection_LocalArray<std::int64_t, 4 * (BSplCLib::MaxDegree() + 1)>    aRuntimeFar(
+    TheFixedDimension != 0 ? 0 : aDimension);
+  std::int64_t* aFar = TheFixedDimension != 0 ? aFixedFar.data() : &aRuntimeFar[0];
   for (size_t aCoordinate = 0; aCoordinate < aDimension; ++aCoordinate)
   {
-    theOrigin[aCoordinate]  = thePoles[aCoordinate];
-    theHighest[aCoordinate] = thePoles[aCoordinate];
+    aFar[aCoordinate] = 0;
   }
+  // A mask instead of an early exit keeps this loop vectorized
   for (size_t aPole = 1; aPole < theNbPoles; ++aPole)
   {
     const double* aPoleData = thePoles + (aPole * aDimension);
     for (size_t aCoordinate = 0; aCoordinate < aDimension; ++aCoordinate)
     {
-      theOrigin[aCoordinate]  = std::min(theOrigin[aCoordinate], aPoleData[aCoordinate]);
-      theHighest[aCoordinate] = std::max(theHighest[aCoordinate], aPoleData[aCoordinate]);
+      const double aFirst = thePoles[aCoordinate];
+      const bool   isNear = std::abs(aPoleData[aCoordinate] - aFirst) <= 0.5 * std::abs(aFirst);
+      aFar[aCoordinate] |= static_cast<std::int64_t>(!isNear);
     }
   }
   for (size_t aCoordinate = 0; aCoordinate < aDimension; ++aCoordinate)
   {
-    const double aFirst   = thePoles[aCoordinate];
-    const double aLowest  = theOrigin[aCoordinate];
-    const double aHighest = theHighest[aCoordinate];
-    // The first pole lies between the extremes, so each sign can only pass its own test
-    const bool isPositiveNear = (aLowest >= 0.5 * aFirst) & (0.5 * aHighest <= aFirst);
-    const bool isNegativeNear = (aHighest <= 0.5 * aFirst) & (0.5 * aLowest >= aFirst);
-    const bool isNear         = (aFirst == 0.0) | isPositiveNear | isNegativeNear;
-    theOrigin[aCoordinate]    = isNear ? aFirst : 0.0;
+    theOrigin[aCoordinate] = aFar[aCoordinate] != 0 ? 0.0 : thePoles[aCoordinate];
   }
 }
 
@@ -1283,7 +1284,8 @@ void boundedPolygonOrigin(const size_t  theNbPoles,
 
 // One derivative order's value from its control polygon on the shared basis, about a common origin:
 // false when a coordinate is out of range or NaN, so a weighted sum could overflow.
-// theScratch holds twice the dimension
+// theScratch holds a dimension known only at run time; a compile-time one stays in this
+// function's own array, in registers: memory written as scalars and read back as vectors stalls
 template <int TheFixedDegree, size_t TheFixedDimension>
 bool evalControlPolygon(const int     theDegree,
                         const size_t  theDimension,
@@ -1306,12 +1308,9 @@ bool evalControlPolygon(const int     theDegree,
   {
     return false;
   }
-  double* anOrigin = theScratch;
-  boundedPolygonOrigin<TheFixedDimension>(aNbPoles,
-                                          aDimension,
-                                          thePoles,
-                                          theScratch + aDimension,
-                                          anOrigin);
+  std::array<double, TheFixedDimension != 0 ? TheFixedDimension : 1> aFixedOrigin{};
+  double* anOrigin = TheFixedDimension != 0 ? aFixedOrigin.data() : theScratch;
+  boundedPolygonOrigin<TheFixedDimension>(aNbPoles, aDimension, thePoles, anOrigin);
   for (size_t aCoordinate = 0; aCoordinate < aDimension; ++aCoordinate)
   {
     theResult[aCoordinate] = 0.0;
@@ -1369,7 +1368,7 @@ struct LocalEvaluation
   bool          IsInterior;     // on the span and neither clamped
   const double* Rows;           // the basis rows, Degree + 1 wide, when HasBasis
   bool          HasBasis;       // the rows hold a usable basis
-  double*       Scratch;        // three times the dimension
+  double*       Scratch;        // twice the dimension, when known only at run time
 };
 
 // One derivative order: its value, then its differentiation, then the value on the pole this frees
@@ -1379,7 +1378,9 @@ void evalOrder(const LocalEvaluation& theEvaluation, const int theDegree, const 
   const int    aDegree    = TheFixedDegree != 0 ? TheFixedDegree : theDegree;
   const size_t aDimension = TheFixedDimension != 0 ? TheFixedDimension : theEvaluation.Dimension;
   double*      aPoles     = theEvaluation.Poles;
-  double*      aResult    = theEvaluation.Scratch + (2 * aDimension);
+  std::array<double, TheFixedDimension != 0 ? TheFixedDimension : 1> aFixedResult{};
+  double*                                                            aResult =
+    TheFixedDimension != 0 ? aFixedResult.data() : theEvaluation.Scratch + aDimension;
   const bool   isClamped  = theEvaluation.IsFirstClamped || theEvaluation.IsLastClamped;
   bool         hasValue   = false;
   if (theEvaluation.HasBasis)
@@ -1456,7 +1457,7 @@ void evalOrders(const LocalEvaluation& theEvaluation)
   constexpr size_t                                   THE_INLINE_SCRATCH = TheFixedDimension != 0
                                                                             ? 3 * TheFixedDimension
                                                                             : static_cast<size_t>(4) * (BSplCLib::MaxDegree() + 1);
-  NCollection_LocalArray<double, THE_INLINE_SCRATCH> aScratch(3 * aDimension);
+  NCollection_LocalArray<double, THE_INLINE_SCRATCH> aScratch(2 * aDimension);
 
   LocalEvaluation anEvaluation = theEvaluation;
   anEvaluation.Rows            = &aRows[0];
