@@ -16,12 +16,14 @@
 #define _OSD_ThreadPool_HeaderFile
 
 #include <NCollection_Array1.hxx>
+#include <NCollection_List.hxx>
 #include <OSD_Thread.hxx>
 #include <Standard_Condition.hxx>
 
 #include <Standard_ProgramError.hxx>
 
 #include <atomic>
+#include <mutex>
 #include <optional>
 
 //! Class defining a thread pool for executing algorithms in multi-threaded mode.
@@ -46,7 +48,8 @@
 //! multi-threaded Job.
 //!   Normally, single Launcher instance will occupy all threads available in thread pool,
 //!   so that nested multi-threaded algorithms (within the same thread)
-//!   and concurrent threads trying to use the same thread pool will run sequentially.
+//!   and concurrent threads trying to use the same thread pool will start sequentially;
+//!   the threads a Launcher releases join the jobs still running with fewer threads than requested.
 //!   This behavior is affected by OSD_ThreadPool::NbDefaultThreadsToLaunch() parameter
 //!   and Launcher constructor, so that single Launcher instance will occupy not all threads
 //!   in the pool allowing other threads to be used concurrently.
@@ -207,7 +210,8 @@ public:
     //! Lock specified number of threads from the thread pool.
     //! If thread pool is already locked by another user,
     //! Launcher will lock as many threads as possible
-    //! (if none will be locked, then single threaded execution will be done).
+    //! (if none will be locked, then the job will start within the caller thread);
+    //! threads released by another user while the job runs will join it.
     //! @param thePool       thread pool to lock the threads
     //! @param theMaxThreads number of threads to lock;
     //!                      -1 specifies that default number of threads
@@ -217,9 +221,9 @@ public:
     //! Release threads.
     ~Launcher() { Release(); }
 
-    //! Return TRUE if at least 2 threads have been locked for parallel execution (including
+    //! Return TRUE if at least 2 threads may be locked for parallel execution (including
     //! self-thread); otherwise, the functor will be executed within the caller thread.
-    bool HasThreads() const { return myNbThreads >= 2; }
+    [[nodiscard]] bool HasThreads() const { return myThreads.Length() >= 2; }
 
     //! Return amount of locked threads; >= 1.
     int NbThreads() const { return myNbThreads; }
@@ -227,8 +231,12 @@ public:
     //! Return the lower thread index.
     int LowerThreadIndex() const { return 0; }
 
-    //! Return the upper thread index (last index is reserved for the self-thread).
-    int UpperThreadIndex() const { return LowerThreadIndex() + myNbThreads - 1; }
+    //! Return the upper thread index (last index is reserved for the self-thread),
+    //! whichever number of the requested threads is locked.
+    [[nodiscard]] int UpperThreadIndex() const
+    {
+      return LowerThreadIndex() + myThreads.Length() - 1;
+    }
 
     //! Simple primitive for parallelization of "for" loops, e.g.:
     //! @code
@@ -264,12 +272,21 @@ public:
     Launcher(const Launcher& theCopy)            = delete;
     Launcher& operator=(const Launcher& theCopy) = delete;
 
+    //! Lock free threads of the pool up to the requested number;
+    //! a thread locked while a job runs starts performing it.
+    void lockThreads();
+
   private:
     // clang-format off
-    NCollection_Array1<EnumeratedThread*> myThreads; //!< array of locked threads (including self-thread)
+    NCollection_Array1<EnumeratedThread*> myThreads; //!< array of requested threads: the locked ones first, the self-thread last
     // clang-format on
     EnumeratedThread mySelfThread;
-    int              myNbThreads; //!< amount of locked threads
+    OSD_ThreadPool*  myPool;          //!< thread pool the threads are locked from
+    JobInterface*    myJob = nullptr; //!< job being performed, which threads locked meanwhile join
+    std::atomic<int> myNbThreads;     //!< amount of locked threads
+    // clang-format off
+    bool             myToCatchFpe = false; //!< floating point exceptions mode of the job being performed
+    // clang-format on
   };
 
 protected:
@@ -352,6 +369,10 @@ private:
 private:
   // clang-format off
   NCollection_Array1<EnumeratedThread> myThreads; //!< array of defined threads (excluding self-thread)
+  // clang-format on
+  // clang-format off
+  NCollection_List<Launcher*> myJoinableLaunchers; //!< launchers performing a job with fewer threads than requested
+  std::mutex myMutex; //!< protects the joinable launchers and their locked threads
   // clang-format on
   int  myNbDefThreads; //!< maximum number of threads to be locked by a single Launcher by default
   bool myShutDown;     //!< flag to shut down (destroy) the thread pool

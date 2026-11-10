@@ -19,8 +19,13 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
 #include <random>
+#include <set>
+#include <thread>
 
 namespace
 {
@@ -209,6 +214,53 @@ void OSD_TestThreadReservation::operator()(const int) const
   }
 }
 
+//=================================================================================================
+
+//! Hold the items of a job until a second thread performs one
+class OSD_TestThreadJoin
+{
+public:
+  //! Perform an item: return once two threads have performed one, or the wait ran out
+  void operator()(int theThreadIndex, int /*theItemIndex*/) const;
+  //! Wait until the job performs its first item, or the wait ran out
+  void WaitStarted() const;
+  //! Return the number of threads that performed an item
+  int NbThreads() const;
+
+private:
+  static constexpr std::chrono::seconds THE_TIMEOUT{10};
+
+  mutable std::mutex              myMutex;
+  mutable std::condition_variable myCondition;
+  mutable std::set<int>           myThreadIndices;
+};
+
+//=================================================================================================
+
+void OSD_TestThreadJoin::operator()(int theThreadIndex, int /*theItemIndex*/) const
+{
+  std::unique_lock<std::mutex> aLock(myMutex);
+  myThreadIndices.insert(theThreadIndex);
+  myCondition.notify_all();
+  myCondition.wait_for(aLock, THE_TIMEOUT, [this]() { return myThreadIndices.size() >= 2; });
+}
+
+//=================================================================================================
+
+void OSD_TestThreadJoin::WaitStarted() const
+{
+  std::unique_lock<std::mutex> aLock(myMutex);
+  myCondition.wait_for(aLock, THE_TIMEOUT, [this]() { return !myThreadIndices.empty(); });
+}
+
+//=================================================================================================
+
+int OSD_TestThreadJoin::NbThreads() const
+{
+  const std::scoped_lock aLock(myMutex);
+  return static_cast<int>(myThreadIndices.size());
+}
+
 } // namespace
 
 // Tests that OSD_Parallel::For and OSD_ThreadPool::Launcher produce the same
@@ -352,4 +404,25 @@ TEST_F(OSD_ParallelLimitTest, IndexedLoopHonorsDefaultThreadLimit)
   std::atomic<bool> aLimitRespected{true};
   OSD_Parallel::For(0, 2, OSD_TestThreadReservation(*aPool, aLimitRespected));
   EXPECT_TRUE(aLimitRespected.load(std::memory_order_relaxed));
+}
+
+//=================================================================================================
+
+// Tests that the thread one Launcher releases joins the job another Launcher
+// started within its caller thread alone
+TEST(OSD_ThreadPoolTest, ReleasedThreadJoinsRunningJob)
+{
+  const occ::handle<OSD_ThreadPool> aPool = new OSD_ThreadPool(2);
+  OSD_ThreadPool::Launcher          aHolder(*aPool);
+  ASSERT_EQ(aHolder.NbThreads(), 2);
+
+  const OSD_TestThreadJoin aFunctor;
+  std::thread              aCaller([&aPool, &aFunctor]() {
+    OSD_ThreadPool::Launcher aLauncher(*aPool);
+    aLauncher.Perform(0, 2, aFunctor);
+  });
+  aFunctor.WaitStarted();
+  aHolder.Release();
+  aCaller.join();
+  EXPECT_EQ(aFunctor.NbThreads(), 2);
 }

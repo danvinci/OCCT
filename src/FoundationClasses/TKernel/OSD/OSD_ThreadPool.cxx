@@ -19,6 +19,8 @@
 #include <Standard_ErrorHandler.hxx>
 #include <TCollection_AsciiString.hxx>
 
+#include <mutex>
+
 IMPLEMENT_STANDARD_RTTIEXT(OSD_ThreadPool, Standard_Transient)
 
 //=================================================================================================
@@ -198,24 +200,53 @@ void OSD_ThreadPool::Launcher::perform(JobInterface& theJob)
 
 void OSD_ThreadPool::Launcher::run(JobInterface& theJob)
 {
-  bool toCatchFpe = OSD::ToCatchFloatingSignals();
-  for (NCollection_Array1<EnumeratedThread*>::Iterator aThreadIter(myThreads);
-       aThreadIter.More() && aThreadIter.Value() != nullptr;
-       aThreadIter.Next())
+  if (myThreads.IsEmpty())
   {
-    aThreadIter.ChangeValue()->WakeUp(&theJob, toCatchFpe);
+    // a released launcher performs nothing
+    return;
   }
+
+  {
+    const std::scoped_lock aLock(myPool->myMutex);
+    myToCatchFpe = OSD::ToCatchFloatingSignals();
+    for (int aThreadIndex = 0; aThreadIndex < myNbThreads - 1; ++aThreadIndex)
+    {
+      myThreads.Value(aThreadIndex)->WakeUp(&theJob, myToCatchFpe);
+    }
+
+    // threads freed since the construction join the job, and so do those freed while it runs
+    myJob = &theJob;
+    lockThreads();
+    if (myNbThreads < myThreads.Length())
+    {
+      myPool->myJoinableLaunchers.Append(this);
+    }
+  }
+
+  // self thread should be executed last
+  mySelfThread.WakeUp(&theJob, myToCatchFpe);
 }
 
 //=================================================================================================
 
 void OSD_ThreadPool::Launcher::wait()
 {
+  {
+    // no thread joins the job from here on
+    const std::scoped_lock aLock(myPool->myMutex);
+    myPool->myJoinableLaunchers.Remove(this);
+    myJob = nullptr;
+  }
+
   int aNbFailures = 0;
-  for (NCollection_Array1<EnumeratedThread*>::Iterator aThreadIter(myThreads);
-       aThreadIter.More() && aThreadIter.Value() != nullptr;
+  for (NCollection_Array1<EnumeratedThread*>::Iterator aThreadIter(myThreads); aThreadIter.More();
        aThreadIter.Next())
   {
+    if (aThreadIter.Value() == nullptr)
+    {
+      continue;
+    }
+
     aThreadIter.ChangeValue()->WaitIdle();
     if (aThreadIter.Value()->myFailure)
     {
@@ -228,11 +259,10 @@ void OSD_ThreadPool::Launcher::wait()
   }
 
   TCollection_AsciiString aFailures;
-  for (NCollection_Array1<EnumeratedThread*>::Iterator aThreadIter(myThreads);
-       aThreadIter.More() && aThreadIter.Value() != nullptr;
+  for (NCollection_Array1<EnumeratedThread*>::Iterator aThreadIter(myThreads); aThreadIter.More();
        aThreadIter.Next())
   {
-    if (aThreadIter.Value()->myFailure)
+    if (aThreadIter.Value() != nullptr && aThreadIter.Value()->myFailure)
     {
       if (aNbFailures == 1)
       {
@@ -319,53 +349,74 @@ void* OSD_ThreadPool::EnumeratedThread::runThread(void* theTask)
 
 OSD_ThreadPool::Launcher::Launcher(OSD_ThreadPool& thePool, int theMaxThreads)
     : mySelfThread(true),
-      myNbThreads(0)
+      myPool(&thePool),
+      myNbThreads(1)
 {
   const int aNbThreads =
     theMaxThreads > 0 ? std::min(theMaxThreads, thePool.NbThreads())
                       : (theMaxThreads < 0 ? std::max(thePool.NbDefaultThreadsToLaunch(), 1) : 1);
   myThreads.Resize(0, aNbThreads - 1, false);
   myThreads.Init(nullptr);
-  if (aNbThreads > 1)
+
+  // self thread takes the last index, whichever number of threads is locked before it
+  myThreads.SetValue(aNbThreads - 1, &mySelfThread);
+  mySelfThread.myThreadIndex = aNbThreads - 1;
+  lockThreads();
+}
+
+//=================================================================================================
+
+void OSD_ThreadPool::Launcher::lockThreads()
+{
+  for (NCollection_Array1<EnumeratedThread>::Iterator aThreadIter(myPool->myThreads);
+       aThreadIter.More() && myNbThreads < myThreads.Length();
+       aThreadIter.Next())
   {
-    for (NCollection_Array1<EnumeratedThread>::Iterator aThreadIter(thePool.myThreads);
-         aThreadIter.More();
-         aThreadIter.Next())
+    EnumeratedThread& aThread = aThreadIter.ChangeValue();
+    if (aThread.Lock())
     {
-      if (aThreadIter.ChangeValue().Lock())
+      // make thread index to fit into myThreads range
+      const int aThreadIndex = myNbThreads - 1;
+      aThread.myThreadIndex  = aThreadIndex;
+      myThreads.SetValue(aThreadIndex, &aThread);
+      ++myNbThreads;
+      if (myJob != nullptr)
       {
-        myThreads.SetValue(myNbThreads, &aThreadIter.ChangeValue());
-        // make thread index to fit into myThreads range
-        aThreadIter.ChangeValue().myThreadIndex = myNbThreads;
-        if (++myNbThreads == aNbThreads - 1)
-        {
-          break;
-        }
+        aThread.WakeUp(myJob, myToCatchFpe);
       }
     }
   }
-
-  // self thread should be executed last
-  myThreads.SetValue(myNbThreads, &mySelfThread);
-  mySelfThread.myThreadIndex = myNbThreads;
-  ++myNbThreads;
 }
 
 //=================================================================================================
 
 void OSD_ThreadPool::Launcher::Release()
 {
-  for (NCollection_Array1<EnumeratedThread*>::Iterator aThreadIter(myThreads);
-       aThreadIter.More() && aThreadIter.Value() != nullptr;
+  bool hasFreed = false;
+  for (NCollection_Array1<EnumeratedThread*>::Iterator aThreadIter(myThreads); aThreadIter.More();
        aThreadIter.Next())
   {
-    if (aThreadIter.Value() != &mySelfThread)
+    if (aThreadIter.Value() != nullptr && aThreadIter.Value() != &mySelfThread)
     {
       aThreadIter.Value()->Free();
+      hasFreed = true;
     }
   }
 
   NCollection_Array1<EnumeratedThread*> anEmpty;
   myThreads.Move(anEmpty);
   myNbThreads = 0;
+  if (!hasFreed)
+  {
+    return;
+  }
+
+  // the freed threads join the jobs running with fewer threads than requested
+  const std::scoped_lock aLock(myPool->myMutex);
+  for (NCollection_List<Launcher*>::Iterator aLauncherIter(myPool->myJoinableLaunchers);
+       aLauncherIter.More();
+       aLauncherIter.Next())
+  {
+    aLauncherIter.Value()->lockThreads();
+  }
 }
